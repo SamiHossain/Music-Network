@@ -4,8 +4,7 @@ import base64
 from requests import post, get
 import json
 import networkx as nx
-from xml.etree.ElementTree import Element, SubElement, tostring
-from xml.dom import minidom
+import time
 
 load_dotenv()
 
@@ -33,7 +32,7 @@ def get_token():
 def get_auth_header(token):
     return {"Authorization": "Bearer " + token}
 
-# function to search for artist and get artist id
+# Function to search for artist and get artist details
 def search_for_artist(token, artist_name):
     url = "https://api.spotify.com/v1/search"
     headers = get_auth_header(token)
@@ -47,45 +46,119 @@ def search_for_artist(token, artist_name):
         print(f"No artist found with the name: {artist_name}")
         return None
     
-    return json_result[0]
+    artist_details = json_result[0]
+    followers = artist_details.get("followers", {}).get("total", 0)
+    genres = artist_details.get("genres", [])
 
-# function to get related artists
-def get_related_artists(token, artist_id):
-    url = f"https://api.spotify.com/v1/artists/{artist_id}/related-artists"
+    return {"id": artist_details["id"], "followers": followers, "genres": genres}
+
+# Function to get all albums of an artist
+def get_all_albums(token, artist_id):
+    url = f"https://api.spotify.com/v1/artists/{artist_id}/albums"
+    headers = get_auth_header(token)
+    params = {"limit": 5}  # You can adjust the limit parameter based on your needs
+    result = get(url, headers=headers, params=params)
+
+    if result.status_code == 200:
+        json_result = json.loads(result.content)["items"]
+        return json_result
+    elif result.status_code == 429:
+        # Retry after the specified duration
+        retry_after = int(result.headers.get('Retry-After', 1))
+        print(f"Rate limit exceeded. Retrying after {retry_after} seconds.")
+        time.sleep(retry_after)
+        return get_all_albums(token, artist_id)
+    else:
+        print(f"Error in get_all_albums request for artist_id {artist_id}. Status code: {result.status_code}")
+        return None
+
+# Function to process an album and get collaborators
+def process_album(token, album, artist_name, graph):
+
+    artist_details = search_for_artist(token, artist_name)
+    if not artist_details:
+        return
+
+    # Convert genres to a string
+    genres_str = ", ".join(artist_details["genres"])
+
+    # Add nodes for the artist with followers and genres attributes
+    graph.add_node(artist_name, followers=str(artist_details["followers"]), genres=genres_str)
+
+    album_id = album["id"]
+    url = f"https://api.spotify.com/v1/albums/{album_id}/tracks"
     headers = get_auth_header(token)
     result = get(url, headers=headers)
 
     if result.status_code == 200:
-        json_result = json.loads(result.content)["artists"]
-        return json_result
-    else:
-        print(f"Error in get_related_artists request for artist_id {artist_id}. Status code: {result.status_code}")
-        print(result.text)
-        return None
+        tracks = json.loads(result.content)["items"]
 
-# Read artist names from a file
+        # Iterate through each track and get collaborators
+        for track in tracks:
+            track_id = track["id"]
+            url = f"https://api.spotify.com/v1/tracks/{track_id}"
+            result = get(url, headers=headers)
+
+            if result.status_code == 200:
+                json_result = json.loads(result.content)
+                artists = json_result.get('artists', [])
+                collaborators = [artist['name'] for artist in artists if artist['name'] != artist_name and artist['name'] in artist_names_set]
+
+                # Add nodes for collaborators to the graph
+                for collaborator in collaborators:
+                        graph.add_node(collaborator)
+                        # Increment the weight of the edge or create a new one
+                        if graph.has_edge(artist_name, collaborator):
+                            graph[artist_name][collaborator]['weight'] += 1
+                        else:
+                            graph.add_edge(artist_name, collaborator, weight=1)
+
+
+
+# Read artist names from a file and convert to a list and a set
 with open("artist_names.txt", "r", encoding="utf-8") as file:
-    artist_names = file.read().splitlines()
+    artist_names_list = file.read().splitlines()
 
-# Create a directed graph using networkx
-graph = nx.DiGraph()
+# Create a set for efficient membership check
+artist_names_set = set(artist_names_list)
 
-# Call the functions for each artist and add edges to the graph
+# Load existing graph from GraphML file
+graph_file = "spotify_network.graphml"
+if os.path.exists(graph_file):
+    graph = nx.read_graphml(graph_file)
+else:
+    graph = nx.DiGraph()
+
+# Call the functions for each artist
 token = get_token()
 
-for source_artist_name in artist_names:
-    print(f"Processing artist: {source_artist_name}")
-    source_result = search_for_artist(token, source_artist_name)
+# Main Execution
+try:
+    for artist_name in artist_names_list:
+        print(f"\nSearching for artist: {artist_name}")
+        result = search_for_artist(token, artist_name)
 
-    if source_result:
-        source_artist_id = source_result["id"]
-        related_artists = get_related_artists(token, source_artist_id)
+        if result:
+            artist_id = result["id"]
 
-        for related_artist in related_artists:
-            target_artist_name = related_artist["name"]
-            graph.add_edge(source_artist_name, target_artist_name)
+            # Get all albums of the artist
+            albums = get_all_albums(token, artist_id)
 
-# Save the graph to a GraphML file
-nx.write_graphml(graph, "spotify_network.graphml")
-print(f"Number of nodes: {graph.number_of_nodes()}")
-print(f"Number of edges: {graph.number_of_edges()}")
+            if albums:
+                # Iterate through each album and get collaborators
+                for album in albums:
+                    process_album(token, album, artist_name, graph)
+
+except KeyboardInterrupt:
+    # Export the graph to GraphML format 
+    nx.write_graphml(graph, graph_file)
+    print(f"\nGraph exported to {graph_file}")
+    print("Script interrupted. Exiting...")
+
+except Exception as e:
+    print(f"An error occurred: {e}")
+
+finally:
+    # Export the graph to GraphML format
+    nx.write_graphml(graph, graph_file)
+    print(f"\nGraph exported to {graph_file}")
