@@ -56,7 +56,7 @@ def search_for_artist(token, artist_name):
 def get_all_albums(token, artist_id):
     url = f"https://api.spotify.com/v1/artists/{artist_id}/albums"
     headers = get_auth_header(token)
-    params = {"limit": 5}  # You can adjust the limit parameter based on your needs
+    params = {"limit": 5}
     result = get(url, headers=headers, params=params)
 
     if result.status_code == 200:
